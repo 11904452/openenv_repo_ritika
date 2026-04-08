@@ -1,0 +1,3 @@
+[console_scripts]
+baseline = bankops_chargeback.baseline:main
+server = bankops_chargeback.server.app:main

@@ -1,0 +1,6 @@
+spec_version: 1
+name: bankops-chargeback
+type: space
+runtime: fastapi
+app: bankops_chargeback.server.app:app
+port: 8000

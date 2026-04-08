@@ -1,0 +1,13 @@
+.env
+.venv
+.codex
+__pycache__/
+server/__pycache__/
+tests/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+BASELINE_REPORT.md
+baseline_results.json

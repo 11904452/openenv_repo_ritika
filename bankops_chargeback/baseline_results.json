@@ -1,0 +1,131 @@
+{
+  "generated_date": "2026-04-08",
+  "baseline_type": "deterministic_oracle",
+  "task_count": 6,
+  "average_score": 1.0,
+  "success_rate": 1.0,
+  "live_model_baseline": {
+    "status": "blocked",
+    "command": ".venv/bin/python -m bankops_chargeback.baseline --base-url http://127.0.0.1:8000",
+    "model": "gemini-2.0-flash-lite",
+    "error_class": "openai.RateLimitError",
+    "error_summary": "429 RESOURCE_EXHAUSTED: provider quota exhausted before the first model step"
+  },
+  "results": [
+    {
+      "task_id": "easy_unauthorized_card_not_present",
+      "difficulty": "easy",
+      "score": 1.0,
+      "success": true,
+      "steps": 7,
+      "done": true,
+      "final_message": "Case closed correctly. The dispute was routed and resolved according to policy.",
+      "trajectory": [
+        "view_transaction",
+        "view_policy",
+        "set_dispute_type:card_not_present_fraud",
+        "set_priority:high",
+        "assign_team:card_disputes",
+        "set_resolution:approve_provisional_credit",
+        "close_case"
+      ]
+    },
+    {
+      "task_id": "medium_subscription_confusion",
+      "difficulty": "medium",
+      "score": 1.0,
+      "success": true,
+      "steps": 8,
+      "done": true,
+      "final_message": "Case closed correctly. The dispute was routed and resolved according to policy.",
+      "trajectory": [
+        "view_transaction",
+        "view_recent_activity",
+        "view_policy",
+        "set_dispute_type:merchant_billing_dispute",
+        "set_priority:medium",
+        "assign_team:billing_disputes",
+        "set_resolution:request_merchant_contact",
+        "close_case"
+      ]
+    },
+    {
+      "task_id": "hard_wallet_account_takeover",
+      "difficulty": "hard",
+      "score": 1.0,
+      "success": true,
+      "steps": 9,
+      "done": true,
+      "final_message": "Case closed correctly. The dispute was routed and resolved according to policy.",
+      "trajectory": [
+        "view_customer_profile",
+        "view_transaction",
+        "view_recent_activity",
+        "view_policy",
+        "set_dispute_type:account_takeover",
+        "set_priority:urgent",
+        "assign_team:fraud_ops",
+        "set_resolution:escalate_fraud_investigation",
+        "close_case"
+      ]
+    },
+    {
+      "task_id": "medium_duplicate_processing_error",
+      "difficulty": "medium",
+      "score": 1.0,
+      "success": true,
+      "steps": 8,
+      "done": true,
+      "final_message": "Case closed correctly. The dispute was routed and resolved according to policy.",
+      "trajectory": [
+        "view_transaction",
+        "view_customer_profile",
+        "view_policy",
+        "set_dispute_type:merchant_processing_error",
+        "set_priority:medium",
+        "assign_team:billing_disputes",
+        "set_resolution:request_merchant_contact",
+        "close_case"
+      ]
+    },
+    {
+      "task_id": "hard_friendly_fraud_denial",
+      "difficulty": "hard",
+      "score": 1.0,
+      "success": true,
+      "steps": 9,
+      "done": true,
+      "final_message": "Case closed correctly. The dispute was routed and resolved according to policy.",
+      "trajectory": [
+        "view_customer_profile",
+        "view_transaction",
+        "view_recent_activity",
+        "view_policy",
+        "set_dispute_type:merchant_billing_dispute",
+        "set_priority:low",
+        "assign_team:billing_disputes",
+        "set_resolution:deny_claim",
+        "close_case"
+      ]
+    },
+    {
+      "task_id": "expert_mixed_signals_tight_budget",
+      "difficulty": "expert",
+      "score": 1.0,
+      "success": true,
+      "steps": 8,
+      "done": true,
+      "final_message": "Case auto-closed correctly at the step budget.",
+      "trajectory": [
+        "view_customer_profile",
+        "view_transaction",
+        "view_recent_activity",
+        "view_policy",
+        "set_dispute_type:account_takeover",
+        "set_priority:urgent",
+        "assign_team:fraud_ops",
+        "set_resolution:escalate_fraud_investigation"
+      ]
+    }
+  ]
+}
