@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from openai import BadRequestError, OpenAI
+from openai import OpenAI
 
 try:
     from .client import ChargebackEnv
@@ -26,6 +26,8 @@ except ImportError:
     from tasks import TASK_IDS
 
 ENV_NAME = "bankops-chargeback"
+
+_FALLBACK_ACTION_TYPE = "view_customer_profile"
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +46,6 @@ def load_env_file_if_needed(
     candidates: Optional[List[Path]] = None,
 ) -> bool:
     """Load .env only when the required runtime env var is missing."""
-
     if os.getenv(fallback_trigger_key):
         return False
 
@@ -56,7 +57,6 @@ def load_env_file_if_needed(
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip("'").strip('"')
@@ -67,21 +67,13 @@ def load_env_file_if_needed(
 
 
 def get_runtime_config() -> Dict[str, Any]:
-    """Resolve runtime config with OS env first and .env as fallback.
-
-    HF_TOKEN is the hackathon-required key name.  OPENAI_API_KEY is accepted
-    as an alternative so the script also works when pointed directly at the
-    OpenAI API (or any other OpenAI-compatible provider that does not use HF).
-    """
-
+    """Resolve runtime config with OS env first and .env as fallback."""
     load_env_file_if_needed()
 
     api_base_url = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
     model_name = os.getenv("MODEL_NAME", "gpt-4.1-mini")
     hf_token = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
     openenv_base_url = os.getenv("OPENENV_BASE_URL", "http://localhost:8000")
-    max_tokens = 512
-    temperature = 0.5
 
     if hf_token is None:
         raise ValueError(
@@ -95,9 +87,10 @@ def get_runtime_config() -> Dict[str, Any]:
         "model_name": model_name,
         "hf_token": hf_token,
         "openenv_base_url": openenv_base_url,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
+        "max_tokens": 512,
+        "temperature": 0.5,
     }
+
 
 SYSTEM_PROMPT = (
     "You are an operations analyst inside a retail bank chargeback desk.\n"
@@ -108,7 +101,33 @@ SYSTEM_PROMPT = (
 
 
 # ---------------------------------------------------------------------------
-# Prompt / action helpers (same logic as baseline.py)
+# Logging helpers — mirrors reference script pattern
+# ---------------------------------------------------------------------------
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: ChargebackAction, reward: float, done: bool, error: Optional[str]) -> None:
+    action_str = f"{action.action_type}:{action.value}" if action.value else str(action.action_type)
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action_str} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.4f} "
+        f"rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt / action helpers
 # ---------------------------------------------------------------------------
 def build_prompt(observation: ChargebackObservation) -> str:
     payload = {
@@ -136,12 +155,10 @@ def choose_action(
     temperature: float = 0.5,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> ChargebackAction:
-    """Call the LLM to pick the next action.
+    """Call the LLM and return the chosen action.
 
-    ``history`` is a list of prior-turn message dicts (alternating
-    assistant / user) that are inserted between the initial user prompt
-    and the current observation, giving the model memory of what it did
-    in previous steps.
+    On any failure, logs a [DEBUG] line and returns a safe fallback action —
+    matching the reference script's pattern of never raising from the model call.
     """
     tool_schema = {
         "type": "function",
@@ -170,16 +187,9 @@ def choose_action(
         },
     }
 
-    # Build the message list: system + history turns + current observation
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
-
-    # Inject prior-step history (assistant tool calls + user feedback pairs)
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
         messages.extend(history)
-
-    # Current observation as the latest user turn
     messages.append(
         {
             "role": "user",
@@ -196,54 +206,45 @@ def choose_action(
         "seed": seed,
         "max_tokens": max_tokens,
         "tools": [tool_schema],
-        "tool_choice": {
-            "type": "function",
-            "function": {"name": "submit_chargeback_action"},
-        },
+        "tool_choice": {"type": "function", "function": {"name": "submit_chargeback_action"}},
         "messages": messages,
     }
 
     try:
         response = client.chat.completions.create(**request_kwargs)
-    except BadRequestError as exc:
-        if "seed" not in str(exc):
+    except Exception as exc:
+        exc_str = str(exc)
+        # Fatal billing/auth errors — re-raise so the task aborts immediately
+        if any(code in exc_str for code in ["402", "401", "403"]):
+            print(f"[DEBUG] Fatal API error (will abort task): {exc}", flush=True)
             raise
-        request_kwargs.pop("seed", None)
-        response = client.chat.completions.create(**request_kwargs)
+        # If the error is due to unsupported `seed` param, retry without it
+        if "seed" in exc_str:
+            try:
+                request_kwargs.pop("seed", None)
+                response = client.chat.completions.create(**request_kwargs)
+            except Exception as retry_exc:
+                print(f"[DEBUG] Model request failed: {retry_exc}", flush=True)
+                return ChargebackAction(action_type=_FALLBACK_ACTION_TYPE)
+        else:
+            print(f"[DEBUG] Model request failed: {exc}", flush=True)
+            return ChargebackAction(action_type=_FALLBACK_ACTION_TYPE)
 
-    message = response.choices[0].message
-    if not message.tool_calls:
-        raise RuntimeError("Model did not return a tool call.")
+    try:
+        message = response.choices[0].message
+        if not message.tool_calls:
+            print(f"[DEBUG] Model returned no tool call. Content: {message.content!r}", flush=True)
+            return ChargebackAction(action_type=_FALLBACK_ACTION_TYPE)
 
-    arguments = json.loads(message.tool_calls[0].function.arguments)
-    return ChargebackAction(
-        action_type=arguments["action_type"],
-        value=arguments.get("value"),
-        rationale=arguments.get("rationale"),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers for [START]/[STEP]/[END]
-# ---------------------------------------------------------------------------
-def _fmt_reward(r: float) -> str:
-    return f"{r:.2f}"
-
-
-def _fmt_bool(b: bool) -> str:
-    return "true" if b else "false"
-
-
-def _fmt_action(action: ChargebackAction) -> str:
-    if action.value:
-        return f"{action.action_type}:{action.value}"
-    return action.action_type
-
-
-def _fmt_error(last_action_error: Optional[str]) -> str:
-    if not last_action_error:
-        return "null"
-    return last_action_error
+        arguments = json.loads(message.tool_calls[0].function.arguments)
+        return ChargebackAction(
+            action_type=arguments["action_type"],
+            value=arguments.get("value"),
+            rationale=arguments.get("rationale"),
+        )
+    except Exception as exc:
+        print(f"[DEBUG] Failed to parse model response: {exc}", flush=True)
+        return ChargebackAction(action_type=_FALLBACK_ACTION_TYPE)
 
 
 # ---------------------------------------------------------------------------
@@ -254,18 +255,13 @@ def run_task(task_id: str, seed: int = 7) -> Dict[str, Any]:
     client = OpenAI(base_url=config["api_base_url"], api_key=config["hf_token"])
     env = ChargebackEnv(base_url=config["openenv_base_url"]).sync()
 
-    print(f"[START] task={task_id} env={ENV_NAME} model={config['model_name']}")
-    sys.stdout.flush()
-
     rewards: List[float] = []
     step_count = 0
     success = False
     score = 0.0
-
-    # Conversation history: list of message dicts (assistant + user pairs)
-    # that are passed back to the LLM on every subsequent step so it retains
-    # memory of what actions it already took and the feedback it received.
     history: List[Dict[str, Any]] = []
+
+    log_start(task=task_id, env=ENV_NAME, model=config["model_name"])
 
     try:
         with env:
@@ -278,8 +274,10 @@ def run_task(task_id: str, seed: int = 7) -> Dict[str, Any]:
                     result.observation,
                     seed=seed,
                     max_tokens=config["max_tokens"],
+                    temperature=config["temperature"],
                     history=history,
                 )
+
                 result = env.step(action)
                 step_count += 1
 
@@ -287,64 +285,32 @@ def run_task(task_id: str, seed: int = 7) -> Dict[str, Any]:
                 error_msg = result.observation.last_action_error
                 rewards.append(reward)
 
-                print(
-                    f"[STEP] step={step_count} "
-                    f"action={_fmt_action(action)} "
-                    f"reward={_fmt_reward(reward)} "
-                    f"done={_fmt_bool(result.done)} "
-                    f"error={_fmt_error(error_msg)}"
-                )
-                sys.stdout.flush()
+                log_step(step=step_count, action=action, reward=reward, done=result.done, error=error_msg)
 
-                # ----------------------------------------------------------
-                # Update conversation history so the model remembers this step
-                # on the next iteration. We append:
-                #   1. An "assistant" turn summarising the action it chose.
-                #   2. A "user" turn with the environment's feedback (reward /
-                #      error), mirroring the pattern from the reference script.
-                # ----------------------------------------------------------
+                # Update conversation history (assistant action + env feedback)
                 action_summary = (
                     f"action_type={action.action_type}"
                     + (f" value={action.value!r}" if action.value else "")
                     + (f" rationale={action.rationale!r}" if action.rationale else "")
                 )
-                history.append(
-                    {"role": "assistant", "content": f"Step {step_count}: {action_summary}"}
-                )
+                history.append({"role": "assistant", "content": f"Step {step_count}: {action_summary}"})
                 feedback_parts = [f"reward={reward:.2f}"]
                 if error_msg:
                     feedback_parts.append(f"error={error_msg}")
                 history.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Step {step_count} result: "
-                            + ", ".join(feedback_parts)
-                            + "."
-                        ),
-                    }
+                    {"role": "user", "content": f"Step {step_count} result: {', '.join(feedback_parts)}."}
                 )
 
             if result.observation.grader:
                 success = result.observation.grader.success
                 score = result.observation.grader.score
 
-    except Exception as exc:
-        # Ensure [END] is always emitted even on exception
-        rewards_str = ",".join(_fmt_reward(r) for r in rewards)
-        print(
-            f"[END] success=false steps={step_count} score={score:.4f} "
-            f"rewards={rewards_str}"
-        )
-        sys.stdout.flush()
-        raise exc
-
-    rewards_str = ",".join(_fmt_reward(r) for r in rewards)
-    print(
-        f"[END] success={_fmt_bool(success)} steps={step_count} score={score:.4f} "
-        f"rewards={rewards_str}"
-    )
-    sys.stdout.flush()
+    finally:
+        try:
+            env.close()
+        except Exception as e:
+            print(f"[DEBUG] env.close() error: {e}", flush=True)
+        log_end(success=success, steps=step_count, score=score, rewards=rewards)
 
     return {
         "task_id": task_id,
@@ -373,7 +339,14 @@ def main() -> None:
 
     task_ids = [args.task_id] if args.task_id else list(TASK_IDS)
     for task_id in task_ids:
-        run_task(task_id, seed=args.seed)
+        try:
+            run_task(task_id, seed=args.seed)
+        except Exception as exc:
+            # Fatal errors (e.g. 402 out-of-credits) are already logged inside
+            # run_task and [END] is already emitted by the finally block.
+            # Just stop processing remaining tasks — no traceback needed.
+            print(f"[DEBUG] Task {task_id} aborted: {exc}", flush=True)
+            break
 
 
 if __name__ == "__main__":
